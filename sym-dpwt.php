@@ -38,6 +38,14 @@ if (!defined('SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG')) {
     define('SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG', 'sym-dpwt-debug');
 }
 
+if (!defined('SYM_DPWT_DEBUG_CLEAR_HOOK')) {
+    define('SYM_DPWT_DEBUG_CLEAR_HOOK', 'sym_dpwt_debug_clear');
+}
+
+if (!defined('SYM_DPWT_DEBUG_TIMEZONE')) {
+    define('SYM_DPWT_DEBUG_TIMEZONE', 'Europe/Copenhagen');
+}
+
 require_once SYM_DPWT_PLUGIN_DIR . 'includes/class-sym-dpwt-debugger.php';
 
 use SymDpwt\Debugger;
@@ -47,15 +55,30 @@ function sym_dpwt_debugger(): Debugger
     return Debugger::instance();
 }
 
+register_activation_hook(SYM_DPWT_PLUGIN_FILE, 'sym_dpwt_activate');
+register_deactivation_hook(SYM_DPWT_PLUGIN_FILE, 'sym_dpwt_deactivate');
+
+function sym_dpwt_activate(): void
+{
+    sym_dpwt_schedule_debug_clear_event();
+}
+
+function sym_dpwt_deactivate(): void
+{
+    sym_dpwt_unschedule_debug_clear_event();
+}
+
 function sym_dpwt_bootstrap(): void
 {
     sym_dpwt_debugger()->init();
+    sym_dpwt_schedule_debug_clear_event();
 
     add_action('admin_menu', 'sym_dpwt_register_debug_menu');
     add_action('admin_enqueue_scripts', 'sym_dpwt_debug_enqueue_assets');
 }
 
 add_action('plugins_loaded', 'sym_dpwt_bootstrap');
+add_action(SYM_DPWT_DEBUG_CLEAR_HOOK, 'sym_dpwt_handle_scheduled_clear');
 
 function sym_dpwt_register_debug_menu(): void
 {
@@ -177,3 +200,63 @@ function sym_dpwt_debug(string $message, array $context = []): void
 {
     sym_dpwt_debugger()->log($message, $context);
 }
+
+function sym_dpwt_handle_scheduled_clear(): void
+{
+    sym_dpwt_debugger()->init();
+    sym_dpwt_debugger()->clear_log();
+}
+
+function sym_dpwt_get_debug_timezone(): \DateTimeZone
+{
+    $name = apply_filters('sym_dpwt_debug_timezone', SYM_DPWT_DEBUG_TIMEZONE);
+
+    try {
+        return new \DateTimeZone($name);
+    } catch (\Exception $exception) {
+        return new \DateTimeZone('Europe/Copenhagen');
+    }
+}
+
+
+function sym_dpwt_schedule_debug_clear_event(): void
+{
+    if (wp_next_scheduled(SYM_DPWT_DEBUG_CLEAR_HOOK)) {
+        return;
+    }
+
+    $timestamp = sym_dpwt_next_debug_clear_timestamp();
+    if ($timestamp > 0) {
+        wp_schedule_event($timestamp, 'daily', SYM_DPWT_DEBUG_CLEAR_HOOK);
+    }
+}
+
+function sym_dpwt_unschedule_debug_clear_event(): void
+{
+    $timestamp = wp_next_scheduled(SYM_DPWT_DEBUG_CLEAR_HOOK);
+    while ($timestamp) {
+        wp_unschedule_event($timestamp, SYM_DPWT_DEBUG_CLEAR_HOOK);
+        $timestamp = wp_next_scheduled(SYM_DPWT_DEBUG_CLEAR_HOOK);
+    }
+}
+
+function sym_dpwt_next_debug_clear_timestamp(): int
+{
+    $timezone = sym_dpwt_get_debug_timezone();
+    $now = new DateTimeImmutable('now', $timezone);
+    $target = $now->setTime(2, 0, 0);
+
+    if ($target <= $now) {
+        $target = $target->modify('+1 day');
+    }
+
+    return $target->getTimestamp();
+}
+
+
+
+
+
+
+
+
