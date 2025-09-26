@@ -1,9 +1,9 @@
 ﻿<?php
 /**
- * Plugin Name:       Sym DPWT
- * Plugin URI:        https://example.com/plugins/sym-dpwt
- * Description:       TODO: Describe the purpose of Sym DPWT.
- * Version:           0.1.0
+ * Plugin Name:       SYM - DPWT
+ * Plugin URI:        https://sevenyellowmonkeys.dk
+ * Description:       Extra functionalities for DPWT Accommodation
+ * Version:           0.1.1
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Jan Eliasen
