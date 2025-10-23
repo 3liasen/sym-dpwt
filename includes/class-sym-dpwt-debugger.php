@@ -3,33 +3,22 @@ declare(strict_types=1);
 
 namespace SymDpwt;
 
-use Throwable;
-
 defined('ABSPATH') || exit;
 
 final class Debugger
 {
-    private const LOG_DIR_NAME = 'sym-dpwt';
-    private const LOG_FILENAME = 'dpwt-debug.log';
-
     private static ?self $instance = null;
 
+    /** @var string */
+    private string $log_dir;
+
+    /** @var string */
     private string $log_file;
-
-    /**
-     * @var callable|null
-     */
-    private $previous_error_handler = null;
-
-    /**
-     * @var callable|null
-     */
-    private $previous_exception_handler = null;
-
-    private bool $initialized = false;
 
     private function __construct()
     {
+        $this->log_dir  = '';
+        $this->log_file = '';
     }
 
     public static function instance(): self
@@ -37,187 +26,145 @@ final class Debugger
         if (null === self::$instance) {
             self::$instance = new self();
         }
-
         return self::$instance;
     }
 
     public function init(): void
     {
-        if ($this->initialized) {
-            return;
+        $uploads = wp_upload_dir(null, false);
+        $base = isset($uploads['basedir']) ? (string) $uploads['basedir'] : WP_CONTENT_DIR . '/uploads';
+        $dir  = trailingslashit($base) . 'sym-dpwt';
+
+        if (!is_dir($dir)) {
+            wp_mkdir_p($dir);
         }
 
-        $this->log_file = $this->determine_log_file();
-        $this->ensure_log_location();
-
-        error_reporting(E_ALL);
-        ini_set('log_errors', '1');
-        ini_set('display_errors', '0');
-        ini_set('error_log', $this->log_file);
-
-        $this->previous_error_handler = set_error_handler([$this, 'handle_error']);
-        $this->previous_exception_handler = set_exception_handler([$this, 'handle_exception']);
-        register_shutdown_function([$this, 'handle_shutdown']);
-
-        \add_action('admin_post_sym_dpwt_clear_log', [$this, 'handle_clear_request']);
-
-        $this->initialized = true;
-    }
-
-    public function log(string $message, array $context = []): void
-    {
-        $context_string = '';
-        if (!empty($context)) {
-            $encoded = \wp_json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-            if ($encoded) {
-                $context_string = ' | ' . $encoded;
+        $file = trailingslashit($dir) . 'debug.log';
+        if (!file_exists($file)) {
+            // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_fopen
+            $h = @fopen($file, 'a');
+            if (is_resource($h)) {
+                @fclose($h);
             }
+            @chmod($file, 0640);
         }
 
-        $entry = sprintf('[%s][INFO] %s%s', gmdate('Y-m-d H:i:s'), $message, $context_string);
-        $this->write($entry);
+        $this->log_dir  = $dir;
+        $this->log_file = $file;
     }
 
     public function get_log_file(): string
     {
+        if (empty($this->log_file)) {
+            $this->init();
+        }
         return $this->log_file;
     }
 
     public function get_log_contents(): string
     {
-        if (!file_exists($this->log_file)) {
+        $file = $this->get_log_file();
+        if (!file_exists($file)) {
             return '';
         }
 
-        $filesize = filesize($this->log_file);
-        if (false === $filesize || 0 === $filesize) {
-            return '';
+        $max = 500 * 1024; // 500KB
+        $size = filesize($file);
+        if (false === $size || $size <= $max) {
+            // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_file_get_contents
+            $content = @file_get_contents($file);
+            return is_string($content) ? $content : '';
         }
 
-        if ($filesize > 500000) {
-            $handle = fopen($this->log_file, 'r');
-            if (false === $handle) {
-                return '';
-            }
-
-            fseek($handle, -500000, SEEK_END);
-            $data = fread($handle, 500000);
-            fclose($handle);
-
-            if (false !== $data) {
-                return "[showing last 500KB]\n" . $data;
-            }
-
+        // Tail last 500KB
+        $fp = @fopen($file, 'rb');
+        if (!$fp) {
             return '';
         }
-
-        $content = file_get_contents($this->log_file);
-
-        return false === $content ? '' : $content;
+        try {
+            @fseek($fp, -$max, SEEK_END);
+            $data = @stream_get_contents($fp);
+            return is_string($data) ? $data : '';
+        } finally {
+            @fclose($fp);
+        }
     }
 
     public function clear_log(): void
     {
-        if (!file_exists($this->log_file)) {
+        $file = $this->get_log_file();
+        if (!file_exists($file)) {
+            return;
+        }
+        // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+        $fp = @fopen($file, 'w');
+        if ($fp) {
+            @fclose($fp);
+        }
+    }
+
+    /**
+     * @param array<string,mixed> $context
+     */
+    public function log(string $message, array $context = [], string $level = 'debug'): void
+    {
+        $level = strtolower($level);
+        if (!$this->should_log($level)) {
             return;
         }
 
-        file_put_contents($this->log_file, '');
+        $line = $this->format_line($message, $context, $level);
+        $this->write($line);
     }
 
-    public function handle_error(int $errno, string $errstr, string $errfile, int $errline): bool
+    private function should_log(string $level): bool
     {
-        $label = $this->map_error_type($errno);
-        $message = sprintf('%s in %s on line %d', $errstr, $errfile, $errline);
-        $this->write($this->format_entry($label, $message));
+        if (!function_exists('\sym_dpwt_get_enabled_levels')) {
+            return true;
+        }
+        $allowed = \sym_dpwt_get_enabled_levels();
+        return in_array($level, $allowed, true);
+    }
 
-        if (is_callable($this->previous_error_handler)) {
-            return (bool) call_user_func($this->previous_error_handler, $errno, $errstr, $errfile, $errline);
+    /**
+     * @param array<string,mixed> $context
+     */
+    private function format_line(string $message, array $context, string $level): string
+    {
+        $tz = \sym_dpwt_get_debug_timezone();
+        $now = new \DateTimeImmutable('now', $tz);
+        $time = $now->format('Y-m-d H:i:s');
+
+        $json = '';
+        if (!empty($context)) {
+            // phpcs:ignore WordPress.WP.AlternativeFunctions.json_json_encode
+            $json = ' ' . wp_json_encode($context, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
-        return false;
+        return sprintf("[%s] %-9s %s%s%s",
+            $time,
+            strtoupper($level),
+            $message,
+            $json,
+            PHP_EOL
+        );
     }
 
-    public function handle_exception(Throwable $exception): void
+    private function write(string $line): void
     {
-        $message = sprintf('%s: %s in %s on line %d', get_class($exception), $exception->getMessage(), $exception->getFile(), $exception->getLine());
-        $this->write($this->format_entry('EXCEPTION', $message));
-        $this->write($this->format_entry('TRACE', $exception->getTraceAsString()));
-
-        if (is_callable($this->previous_exception_handler)) {
-            call_user_func($this->previous_exception_handler, $exception);
-        }
-    }
-
-    public function handle_shutdown(): void
-    {
-        $error = error_get_last();
-        if (null === $error) {
+        $file = $this->get_log_file();
+        // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_fopen
+        $fp = @fopen($file, 'ab');
+        if (!$fp) {
             return;
         }
-
-        $label = $this->map_error_type((int) $error['type']);
-        $message = sprintf('%s in %s on line %d', $error['message'], $error['file'], $error['line']);
-        $this->write($this->format_entry($label, $message));
-    }
-
-    public function handle_clear_request(): void
-    {
-        if (!\current_user_can('manage_options')) {
-            \wp_die(\esc_html__('You do not have permission to clear the log.', 'sym-dpwt'));
+        try {
+            @flock($fp, LOCK_EX);
+            @fwrite($fp, $line);
+            @fflush($fp);
+            @flock($fp, LOCK_UN);
+        } finally {
+            @fclose($fp);
         }
-
-        \check_admin_referer('sym_dpwt_clear_log');
-        $this->clear_log();
-
-        $page = \defined('SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG') ? SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG : 'sym-dpwt-debug';
-
-        \wp_safe_redirect(\add_query_arg(['page' => $page, 'cleared' => '1'], \admin_url('admin.php')));
-        exit;
-    }
-
-    private function determine_log_file(): string
-    {
-        $uploads = \wp_upload_dir();
-        $base_dir = isset($uploads['basedir']) ? (string) $uploads['basedir'] : WP_CONTENT_DIR;
-        $log_dir = \trailingslashit($base_dir) . self::LOG_DIR_NAME;
-
-        return \trailingslashit($log_dir) . self::LOG_FILENAME;
-    }
-
-    private function ensure_log_location(): void
-    {
-        $dir = dirname($this->log_file);
-        if (!is_dir($dir)) {
-            \wp_mkdir_p($dir);
-        }
-
-        if (!file_exists($this->log_file)) {
-            file_put_contents($this->log_file, '');
-        }
-    }
-
-    private function write(string $entry): void
-    {
-        $line = $entry . "\n";
-        file_put_contents($this->log_file, $line, FILE_APPEND | LOCK_EX);
-    }
-
-    private function map_error_type(int $errno): string
-    {
-        return match ($errno) {
-            E_ERROR, E_USER_ERROR, E_RECOVERABLE_ERROR => 'ERROR',
-            E_WARNING, E_USER_WARNING => 'WARNING',
-            E_PARSE => 'PARSE',
-            E_NOTICE, E_USER_NOTICE => 'NOTICE',
-            E_STRICT => 'STRICT',
-            E_DEPRECATED, E_USER_DEPRECATED => 'DEPRECATED',
-            default => 'INFO',
-        };
-    }
-
-    private function format_entry(string $label, string $message): string
-    {
-        return sprintf('[%s][%s] %s', gmdate('Y-m-d H:i:s'), $label, $message);
     }
 }

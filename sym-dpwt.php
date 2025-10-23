@@ -46,6 +46,15 @@ if (!defined('SYM_DPWT_DEBUG_TIMEZONE')) {
     define('SYM_DPWT_DEBUG_TIMEZONE', 'Europe/Copenhagen');
 }
 
+// New: option names for selectable log levels
+if (!defined('SYM_DPWT_LOG_LEVELS_OPTION')) {
+    define('SYM_DPWT_LOG_LEVELS_OPTION', 'sym_dpwt_log_levels');
+}
+if (!defined('SYM_DPWT_DEFAULT_LOG_LEVELS')) {
+    // PSR-3 levels
+    define('SYM_DPWT_DEFAULT_LOG_LEVELS', serialize(['debug','info','notice','warning','error','critical','alert','emergency']));
+}
+
 require_once SYM_DPWT_PLUGIN_DIR . 'includes/class-sym-dpwt-debugger.php';
 
 use SymDpwt\Debugger;
@@ -75,6 +84,9 @@ function sym_dpwt_bootstrap(): void
 
     add_action('admin_menu', 'sym_dpwt_register_debug_menu');
     add_action('admin_enqueue_scripts', 'sym_dpwt_debug_enqueue_assets');
+
+    // New: settings for selectable log levels
+    add_action('admin_init', 'sym_dpwt_register_logging_settings');
 }
 
 add_action('plugins_loaded', 'sym_dpwt_bootstrap');
@@ -160,6 +172,76 @@ JS;
     );
 }
 
+// New: Settings registration and helpers
+function sym_dpwt_get_enabled_levels(): array
+{
+    $levels = get_option(SYM_DPWT_LOG_LEVELS_OPTION);
+    if (!is_array($levels) || !$levels) {
+        return unserialize(SYM_DPWT_DEFAULT_LOG_LEVELS);
+    }
+    return array_values(array_intersect(
+        $levels,
+        ['debug','info','notice','warning','error','critical','alert','emergency']
+    ));
+}
+
+function sym_dpwt_register_logging_settings(): void
+{
+    register_setting(
+        'sym-dpwt-logging',
+        SYM_DPWT_LOG_LEVELS_OPTION,
+        [
+            'type' => 'array',
+            'description' => 'SYM DPWT: enabled log levels',
+            'sanitize_callback' => function ($val) {
+                $allowed = ['debug','info','notice','warning','error','critical','alert','emergency'];
+                if (!is_array($val)) { return unserialize(SYM_DPWT_DEFAULT_LOG_LEVELS); }
+                $clean = array_values(array_intersect($allowed, array_map('strval', $val)));
+                return $clean ?: unserialize(SYM_DPWT_DEFAULT_LOG_LEVELS);
+            },
+            'default' => unserialize(SYM_DPWT_DEFAULT_LOG_LEVELS),
+            'show_in_rest' => false,
+        ]
+    );
+
+    add_settings_section(
+        'sym_dpwt_logging_section',
+        __('Logging settings', 'sym-dpwt'),
+        '__return_false',
+        SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG
+    );
+
+    add_settings_field(
+        'sym_dpwt_log_levels',
+        __('Log levels to record', 'sym-dpwt'),
+        'sym_dpwt_render_log_levels_field',
+        SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG,
+        'sym_dpwt_logging_section'
+    );
+}
+
+function sym_dpwt_render_log_levels_field(): void
+{
+    $enabled = sym_dpwt_get_enabled_levels();
+    $levels = ['debug','info','notice','warning','error','critical','alert','emergency'];
+    echo '<fieldset>';
+    foreach ($levels as $lvl) {
+        $id = 'sym-dpwt-level-' . esc_attr($lvl);
+        printf(
+            '<label for="%1$s" style="display:inline-block;min-width:140px;margin:0 16px 8px 0;">
+                <input type="checkbox" name="%2$s[]" id="%1$s" value="%3$s"%4$s />
+                %5$s
+            </label>',
+            $id,
+            esc_attr(SYM_DPWT_LOG_LEVELS_OPTION),
+            esc_attr($lvl),
+            in_array($lvl, $enabled, true) ? ' checked' : '',
+            esc_html(ucfirst($lvl))
+        );
+    }
+    echo '</fieldset>';
+}
+
 function sym_dpwt_render_debug_page(): void
 {
     if (!current_user_can('manage_options')) {
@@ -178,6 +260,15 @@ function sym_dpwt_render_debug_page(): void
                 <p><?php esc_html_e('Debug log cleared.', 'sym-dpwt'); ?></p>
             </div>
         <?php endif; ?>
+
+        <form method="post" action="options.php" style="margin-bottom:16px;">
+            <?php
+            settings_fields('sym-dpwt-logging');
+            do_settings_sections(SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG);
+            submit_button(__('Save logging settings', 'sym-dpwt'));
+            ?>
+        </form>
+
         <p>
             <?php esc_html_e('Log file location:', 'sym-dpwt'); ?>
             <code><?php echo esc_html($log_file); ?></code>
@@ -196,9 +287,17 @@ function sym_dpwt_render_debug_page(): void
     <?php
 }
 
-function sym_dpwt_debug(string $message, array $context = []): void
+function sym_dpwt_debug(string $message, array $context = [], string $level = 'debug'): void
 {
-    sym_dpwt_debugger()->log($message, $context);
+    if (isset($context['level']) && is_string($context['level'])) {
+        $level = $context['level'];
+        unset($context['level']);
+    } elseif (isset($context['_level']) && is_string($context['_level'])) {
+        $level = $context['_level'];
+        unset($context['_level']);
+    }
+
+    sym_dpwt_debugger()->log($message, $context, $level);
 }
 
 function sym_dpwt_handle_scheduled_clear(): void
@@ -217,7 +316,6 @@ function sym_dpwt_get_debug_timezone(): \DateTimeZone
         return new \DateTimeZone('Europe/Copenhagen');
     }
 }
-
 
 function sym_dpwt_schedule_debug_clear_event(): void
 {
@@ -253,10 +351,13 @@ function sym_dpwt_next_debug_clear_timestamp(): int
     return $target->getTimestamp();
 }
 
-
-
-
-
-
-
-
+// Admin-post handler for Clear content
+add_action('admin_post_sym_dpwt_clear_log', function (): void {
+    if (!current_user_can('manage_options')) {
+        wp_die(esc_html__('Insufficient permissions', 'sym-dpwt'));
+    }
+    check_admin_referer('sym_dpwt_clear_log');
+    sym_dpwt_handle_scheduled_clear();
+    wp_safe_redirect(add_query_arg('cleared', '1', menu_page_url(SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG, false)));
+    exit;
+});
