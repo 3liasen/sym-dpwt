@@ -4,7 +4,7 @@ declare(strict_types=1);
  * Plugin Name:       SYM - DPWT
  * Plugin URI:        https://sevenyellowmonkeys.dk
  * Description:       Extra functionalities for DPWT Accommodation
- * Version:           0.3.0
+ * Version:           0.4.0
  * Requires at least: 6.0
  * Requires PHP:      8.0
  * Author:            Jan Eliasen
@@ -19,7 +19,7 @@ declare(strict_types=1);
 defined('ABSPATH') || exit;
 
 if (!defined('SYM_DPWT_VERSION')) {
-    define('SYM_DPWT_VERSION', '0.2.0');
+    define('SYM_DPWT_VERSION', '0.4.0');
 }
 
 if (!defined('SYM_DPWT_PLUGIN_FILE')) {
@@ -36,6 +36,10 @@ if (!defined('SYM_DPWT_PLUGIN_URL')) {
 
 if (!defined('SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG')) {
     define('SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG', 'sym-dpwt-debug');
+}
+
+if (!defined('SYM_DPWT_TOOLS_ADMIN_PAGE_SLUG')) {
+    define('SYM_DPWT_TOOLS_ADMIN_PAGE_SLUG', 'sym-dpwt-tools');
 }
 
 if (!defined('SYM_DPWT_DEBUG_CLEAR_HOOK')) {
@@ -55,7 +59,12 @@ if (!defined('SYM_DPWT_DEFAULT_LOG_LEVELS')) {
     define('SYM_DPWT_DEFAULT_LOG_LEVELS', serialize(['debug','info','notice','warning','error','critical','alert','emergency']));
 }
 
+if (!defined('SYM_DPWT_ADMIN_CSS_OPTION')) {
+    define('SYM_DPWT_ADMIN_CSS_OPTION', 'sym_dpwt_admin_css');
+}
+
 require_once SYM_DPWT_PLUGIN_DIR . 'includes/class-sym-dpwt-debugger.php';
+require_once SYM_DPWT_PLUGIN_DIR . 'includes/sym-dpwt-admin-tools.php';
 
 use SymDpwt\Debugger;
 
@@ -84,6 +93,8 @@ function sym_dpwt_bootstrap(): void
 
     add_action('admin_menu', 'sym_dpwt_register_debug_menu');
     add_action('admin_enqueue_scripts', 'sym_dpwt_debug_enqueue_assets');
+    add_action('admin_init', 'sym_dpwt_register_tools_settings');
+    add_action('admin_head', 'sym_dpwt_render_admin_custom_css');
 
     // New: settings for selectable log levels
     add_action('admin_init', 'sym_dpwt_register_logging_settings');
@@ -99,13 +110,22 @@ function sym_dpwt_register_debug_menu(): void
     }
 
     add_menu_page(
-        __('DPWT Debug', 'sym-dpwt'),
-        __('DPWT-Debug', 'sym-dpwt'),
+        __('SYM-DPWT', 'sym-dpwt'),
+        __('SYM-DPWT', 'sym-dpwt'),
         'manage_options',
         SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG,
         'sym_dpwt_render_debug_page',
         'dashicons-admin-tools',
         59
+    );
+
+    add_submenu_page(
+        SYM_DPWT_DEBUG_ADMIN_PAGE_SLUG,
+        __('Tools', 'sym-dpwt'),
+        __('Tools', 'sym-dpwt'),
+        'manage_options',
+        SYM_DPWT_TOOLS_ADMIN_PAGE_SLUG,
+        'sym_dpwt_render_tools_page'
     );
 }
 
@@ -254,7 +274,7 @@ function sym_dpwt_render_debug_page(): void
     $cleared = '1' === filter_input(INPUT_GET, 'cleared', FILTER_SANITIZE_NUMBER_INT);
     ?>
     <div class="wrap">
-        <h1><?php esc_html_e('DPWT Debug', 'sym-dpwt'); ?></h1>
+        <h1><?php esc_html_e('SYM-DPWT', 'sym-dpwt'); ?></h1>
         <?php if ($cleared) : ?>
             <div class="notice notice-success is-dismissible">
                 <p><?php esc_html_e('Debug log cleared.', 'sym-dpwt'); ?></p>
